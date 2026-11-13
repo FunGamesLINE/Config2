@@ -1,5 +1,5 @@
-package_name: requests
-repository_url: https://example.com/repo
+package_name: ripgrep
+repository_url: https://github.com/BurntSushi/ripgrep
 test_mode: false
 ascii_tree: true
 max_depth: 3
