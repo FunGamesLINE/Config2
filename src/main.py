@@ -1,14 +1,19 @@
 import argparse
+import json
 import tomllib
 import urllib.request
 
 import yaml
 
 MIN_DEPTH = 1
+ROOT_DEPTH = 0
 TIMEOUT = 10
 GITHUB_PREFIX = "https://github.com/"
 RAW_PREFIX = "https://raw.githubusercontent.com/"
+API_URL = "https://crates.io/api/v1/crates/"
 MANIFEST_NAME = "Cargo.toml"
+NORMAL_KIND = "normal"
+HEADERS = {"User-Agent": "dep-graph-student-project"}
 
 PARAMS = {
     "package_name": str,
@@ -71,7 +76,7 @@ def make_manifest_url(repository_url):
 
 
 def read_local_file(path):
-    """Читает текст тестового файла Cargo.toml с диска."""
+    """Читает текст тестового файла с диска."""
     try:
         with open(path, encoding="utf-8") as file:
             return file.read()
@@ -81,15 +86,16 @@ def read_local_file(path):
 
 def download_text(url):
     """Скачивает текстовый файл по ссылке."""
+    request = urllib.request.Request(url, headers=HEADERS)
     try:
-        with urllib.request.urlopen(url, timeout=TIMEOUT) as response:
+        with urllib.request.urlopen(request, timeout=TIMEOUT) as response:
             return response.read().decode("utf-8")
     except (OSError, ValueError) as error:
         raise ConfigError(f"Не удалось скачать {url}: {error}")
 
 
 def read_manifest_text(config):
-    """Возвращает текст Cargo.toml из файла или из репозитория."""
+    """Возвращает текст тестового файла или Cargo.toml из репозитория."""
     if config["test_mode"]:
         return read_local_file(config["repository_url"])
     return download_text(make_manifest_url(config["repository_url"]))
@@ -112,30 +118,119 @@ def get_dependencies(text):
     return {name: get_version(spec) for name, spec in section.items()}
 
 
-def print_dependencies(package_name, dependencies):
-    """Выводит прямые зависимости пакета."""
-    print(f"Прямые зависимости пакета {package_name}:")
-    if not dependencies:
-        print("нет")
-    for name, version in dependencies.items():
-        print(f"{name} {version}")
+def parse_graph(text):
+    """Разбирает описание тестового графа: строки вида 'A: B C'."""
+    graph = {}
+    for line in text.splitlines():
+        if not line.strip():
+            continue
+        name, separator, rest = line.partition(":")
+        if not separator:
+            raise ConfigError(f"Неверная строка графа: '{line}'")
+        graph[name.strip()] = rest.split()
+    return graph
+
+
+def fetch_json(url):
+    """Скачивает ответ по ссылке и разбирает его как JSON."""
+    text = download_text(url)
+    try:
+        return json.loads(text)
+    except ValueError as error:
+        raise ConfigError(f"Неверный ответ от {url}: {error}")
+
+
+def get_latest_version(name):
+    """Возвращает последнюю версию пакета из реестра crates.io."""
+    info = fetch_json(f"{API_URL}{name}")
+    try:
+        return info["crate"]["max_version"]
+    except (KeyError, TypeError):
+        raise ConfigError(f"Не найдена версия пакета '{name}'")
+
+
+def fetch_crate_dependencies(name):
+    """Получает имена зависимостей последней версии пакета с crates.io."""
+    version = get_latest_version(name)
+    data = fetch_json(f"{API_URL}{name}/{version}/dependencies")
+    try:
+        return [
+            item["crate_id"]
+            for item in data["dependencies"]
+            if item["kind"] == NORMAL_KIND
+        ]
+    except (KeyError, TypeError):
+        raise ConfigError(f"Неверный ответ реестра для '{name}'")
+
+
+def load_source(config):
+    """Возвращает словарь пакет - список зависимостей с корневым пакетом."""
+    text = read_manifest_text(config)
+    name = config["package_name"]
+    if config["test_mode"]:
+        source = parse_graph(text)
+        if name not in source:
+            raise ConfigError(f"Пакет '{name}' не найден в файле графа")
+        return source
+    return {name: list(get_dependencies(text))}
+
+
+def get_children(source, name, test_mode):
+    """Возвращает зависимости пакета, при необходимости загружая их."""
+    if name not in source and not test_mode:
+        source[name] = fetch_crate_dependencies(name)
+    return source.get(name, [])
+
+
+def is_skipped(name, substring):
+    """Проверяет, нужно ли пропустить пакет из-за подстроки в имени."""
+    return bool(substring) and substring in name
+
+
+def build_graph(level, graph, source, config, depth):
+    """Строит граф обходом в ширину. Вызов обрабатывает один уровень."""
+    if not level or depth >= config["max_depth"]:
+        return
+    next_level = []
+    for name in level:
+        if name in graph:
+            continue
+        children = get_children(source, name, config["test_mode"])
+        children = [
+            child
+            for child in children
+            if not is_skipped(child, config["filter_substring"])
+        ]
+        graph[name] = children
+        next_level.extend(children)
+    build_graph(next_level, graph, source, config, depth + 1)
+
+
+def print_graph(package_name, graph):
+    """Выводит граф: пакет и его прямые зависимости."""
+    print(f"Граф зависимостей пакета {package_name}:")
+    for name, children in graph.items():
+        text = " ".join(children) or "нет"
+        print(f"{name}: {text}")
 
 
 def main():
-    """Читает конфигурацию и выводит прямые зависимости пакета."""
+    """Читает конфигурацию, строит и выводит граф зависимостей."""
     parser = argparse.ArgumentParser(description="Граф зависимостей пакета")
     parser.add_argument(
         "-c", "--config", default="config.yaml", help="путь к YAML-файлу"
     )
     args = parser.parse_args()
+    graph = {}
     try:
         config = load_config(args.config)
         validate_config(config)
-        text = read_manifest_text(config)
-        dependencies = get_dependencies(text)
+        source = load_source(config)
+        root = [config["package_name"]]
+        build_graph(root, graph, source, config, ROOT_DEPTH)
     except ConfigError as error:
         raise SystemExit(f"Ошибка: {error}")
-    print_dependencies(config["package_name"], dependencies)
+    print_graph(config["package_name"], graph)
 
 
 if __name__ == "__main__":

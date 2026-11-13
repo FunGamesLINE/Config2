@@ -1,11 +1,13 @@
-"""Тесты проверки конфигурации и получения зависимостей."""
+"""Тесты конфигурации, получения зависимостей и построения графа."""
 
 import unittest
 
 from src.main import (
     ConfigError,
+    build_graph,
     get_dependencies,
     make_manifest_url,
+    parse_graph,
     validate_config,
 )
 
@@ -30,6 +32,30 @@ local = { path = "../local" }
 [dev-dependencies]
 tempfile = "3"
 """
+
+SOURCE = {
+    "A": ["B", "C"],
+    "B": ["D"],
+    "C": ["D", "E"],
+    "D": ["F"],
+    "E": [],
+    "F": [],
+}
+
+CYCLE = {"X": ["Y"], "Y": ["Z"], "Z": ["X"]}
+
+
+def make_graph(root, source, max_depth, substring=""):
+    """Строит граф в тестовом режиме и возвращает его."""
+    config = dict(
+        VALID,
+        test_mode=True,
+        max_depth=max_depth,
+        filter_substring=substring,
+    )
+    graph = {}
+    build_graph([root], graph, source, config, 0)
+    return graph
 
 
 class ValidateConfigTest(unittest.TestCase):
@@ -85,6 +111,50 @@ class DependenciesTest(unittest.TestCase):
         """Неверный адрес вызывает ошибку."""
         with self.assertRaises(ConfigError):
             make_manifest_url("https://example.com/repo")
+
+
+class ParseGraphTest(unittest.TestCase):
+    """Проверки разбора файла тестового графа."""
+
+    def test_parse(self):
+        """Строки разбираются в словарь пакет - зависимости."""
+        result = parse_graph("A: B C\nB:\n\n")
+        self.assertEqual(result, {"A": ["B", "C"], "B": []})
+
+    def test_bad_line(self):
+        """Строка без двоеточия вызывает ошибку."""
+        with self.assertRaises(ConfigError):
+            parse_graph("A B C")
+
+
+class BuildGraphTest(unittest.TestCase):
+    """Проверки построения графа зависимостей."""
+
+    def test_full_graph(self):
+        """Транзитивные зависимости попадают в граф."""
+        graph = make_graph("A", SOURCE, 10)
+        self.assertEqual(graph, SOURCE)
+
+    def test_max_depth(self):
+        """Граф не глубже заданной глубины."""
+        graph = make_graph("A", SOURCE, 2)
+        self.assertEqual(
+            graph,
+            {"A": ["B", "C"], "B": ["D"], "C": ["D", "E"]},
+        )
+
+    def test_filter(self):
+        """Пакеты с подстрокой в имени исключаются."""
+        graph = make_graph("A", SOURCE, 10, "D")
+        self.assertEqual(
+            graph,
+            {"A": ["B", "C"], "B": [], "C": ["E"], "E": []},
+        )
+
+    def test_cycle(self):
+        """Цикл не приводит к зависанию."""
+        graph = make_graph("X", CYCLE, 10)
+        self.assertEqual(graph, CYCLE)
 
 
 if __name__ == "__main__":
