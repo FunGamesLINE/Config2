@@ -1,13 +1,20 @@
 """Тесты конфигурации, получения зависимостей и построения графа."""
 
 import unittest
+import base64
+import zlib
 
 from src.main import (
+    BASE64_ALPHABET,
+    PLANTUML_ALPHABET,
     ConfigError,
     build_graph,
+    encode_plantuml,
     get_dependencies,
     invert_graph,
+    make_ascii_tree,
     make_manifest_url,
+    make_plantuml,
     parse_graph,
     validate_config,
 )
@@ -180,6 +187,63 @@ class ReverseGraphTest(unittest.TestCase):
         """Цикл в обратном режиме не приводит к зависанию."""
         graph = make_graph("X", invert_graph(CYCLE), 10)
         self.assertEqual(graph, {"X": ["Z"], "Z": ["Y"], "Y": ["X"]})
+
+
+def decode_plantuml(encoded):
+    """Обратное действие к encode_plantuml: возвращает текст диаграммы."""
+    table = str.maketrans(PLANTUML_ALPHABET, BASE64_ALPHABET)
+    packed = base64.b64decode(encoded.translate(table))
+    decompressor = zlib.decompressobj(-zlib.MAX_WBITS)
+    return decompressor.decompress(packed).decode("utf-8")
+
+
+class VisualizationTest(unittest.TestCase):
+    """Проверки ASCII-дерева и текста PlantUML."""
+
+    def test_ascii_tree(self):
+        """Повторяющийся пакет помечается и не раскрывается дважды."""
+        graph = make_graph("A", SOURCE, 10)
+        expected = "\n".join(
+            [
+                "A",
+                "|-- B",
+                "|   `-- D",
+                "|       `-- F",
+                "`-- C",
+                "    |-- D (*)",
+                "    `-- E",
+            ]
+        )
+        self.assertEqual(make_ascii_tree("A", graph), expected)
+
+    def test_ascii_tree_cycle(self):
+        """Цикл в ASCII-дереве обрывается пометкой."""
+        graph = make_graph("X", CYCLE, 10)
+        expected = "\n".join(["X", "`-- Y", "    `-- Z", "        `-- X (*)"])
+        self.assertEqual(make_ascii_tree("X", graph), expected)
+
+    def test_plantuml(self):
+        """Текст PlantUML содержит пакеты и стрелки зависимостей."""
+        expected = "\n".join(
+            [
+                "@startuml",
+                'component "A" as n0',
+                'component "B" as n1',
+                "n0 --> n1",
+                "@enduml",
+            ]
+        )
+        self.assertEqual(make_plantuml({"A": ["B"]}, False), expected)
+
+    def test_plantuml_reverse(self):
+        """В обратном режиме стрелка идёт от зависящего пакета."""
+        result = make_plantuml({"F": ["D"]}, True)
+        self.assertIn("n1 --> n0", result)
+
+    def test_encode_plantuml(self):
+        """Закодированный текст можно раскодировать обратно."""
+        text = make_plantuml({"A": ["B", "C"]}, False)
+        self.assertEqual(decode_plantuml(encode_plantuml(text)), text)
 
 
 if __name__ == "__main__":

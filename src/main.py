@@ -1,20 +1,42 @@
 import argparse
+import base64
 import json
+import string
 import tomllib
 import urllib.request
+import webbrowser
+import zlib
+from pathlib import Path
 
 import yaml
 
 MIN_DEPTH = 1
 ROOT_DEPTH = 0
 TIMEOUT = 10
+BLOCK_SIZE = 3
 GITHUB_PREFIX = "https://github.com/"
 RAW_PREFIX = "https://raw.githubusercontent.com/"
 API_URL = "https://crates.io/api/v1/crates/"
 REVERSE_SUFFIX = "/reverse_dependencies?per_page=100"
+PLANTUML_URL = "https://www.plantuml.com/plantuml/png/"
+IMAGE_FILE = "graph.png"
 MANIFEST_NAME = "Cargo.toml"
 NORMAL_KIND = "normal"
 HEADERS = {"User-Agent": "dep-graph-student-project"}
+
+BASE64_ALPHABET = (
+    string.ascii_uppercase + string.ascii_lowercase + string.digits + "+/"
+)
+PLANTUML_ALPHABET = (
+    string.digits + string.ascii_uppercase + string.ascii_lowercase + "-_"
+)
+TRANSLATION = str.maketrans(BASE64_ALPHABET, PLANTUML_ALPHABET)
+
+BRANCH = "|-- "
+LAST_BRANCH = "`-- "
+LINE_PREFIX = "|   "
+EMPTY_PREFIX = "    "
+REPEAT_MARK = " (*)"
 
 PARAMS = {
     "package_name": str,
@@ -86,14 +108,23 @@ def read_local_file(path):
         raise ConfigError(f"Не удалось открыть файл: {error}")
 
 
-def download_text(url):
-    """Скачивает текстовый файл по ссылке."""
+def download_bytes(url):
+    """Скачивает файл по ссылке и возвращает его содержимое."""
     request = urllib.request.Request(url, headers=HEADERS)
     try:
         with urllib.request.urlopen(request, timeout=TIMEOUT) as response:
-            return response.read().decode("utf-8")
+            return response.read()
     except (OSError, ValueError) as error:
         raise ConfigError(f"Не удалось скачать {url}: {error}")
+
+
+def download_text(url):
+    """Скачивает текстовый файл по ссылке."""
+    data = download_bytes(url)
+    try:
+        return data.decode("utf-8")
+    except UnicodeDecodeError as error:
+        raise ConfigError(f"Не удалось прочитать {url}: {error}")
 
 
 def read_manifest_text(config):
@@ -252,8 +283,103 @@ def print_graph(package_name, graph, reverse_mode):
         print(f"{name}: {text}")
 
 
+def add_tree_lines(graph, name, prefix, shown, lines):
+    """Добавляет в lines строки ASCII-дерева для зависимостей пакета."""
+    shown.add(name)
+    children = graph.get(name, [])
+    last_index = len(children) - 1
+    for index, child in enumerate(children):
+        is_last = index == last_index
+        branch = LAST_BRANCH if is_last else BRANCH
+        repeated = child in shown and bool(graph.get(child))
+        mark = REPEAT_MARK if repeated else ""
+        lines.append(f"{prefix}{branch}{child}{mark}")
+        if child not in shown:
+            extra = EMPTY_PREFIX if is_last else LINE_PREFIX
+            add_tree_lines(graph, child, prefix + extra, shown, lines)
+
+
+def make_ascii_tree(root, graph):
+    """Возвращает текст ASCII-дерева зависимостей пакета."""
+    lines = [root]
+    add_tree_lines(graph, root, "", set(), lines)
+    return "\n".join(lines)
+
+
+def collect_names(graph):
+    """Возвращает все пакеты графа без повторов в порядке появления."""
+    names = []
+    for name, children in graph.items():
+        for item in [name] + children:
+            if item not in names:
+                names.append(item)
+    return names
+
+
+def get_edges(graph, reverse_mode):
+    """Возвращает список рёбер (зависящий пакет, нужный ему пакет)."""
+    edges = []
+    for name, children in graph.items():
+        for child in children:
+            if reverse_mode:
+                edges.append((child, name))
+            else:
+                edges.append((name, child))
+    return edges
+
+
+def make_plantuml(graph, reverse_mode):
+    """Формирует текст диаграммы PlantUML по графу зависимостей."""
+    names = collect_names(graph)
+    aliases = {name: f"n{index}" for index, name in enumerate(names)}
+    lines = ["@startuml"]
+    for name, alias in aliases.items():
+        lines.append(f'component "{name}" as {alias}')
+    for source, target in get_edges(graph, reverse_mode):
+        lines.append(f"{aliases[source]} --> {aliases[target]}")
+    lines.append("@enduml")
+    return "\n".join(lines)
+
+
+def encode_plantuml(text):
+    """Кодирует текст диаграммы для адреса сервера PlantUML."""
+    compressor = zlib.compressobj(
+        zlib.Z_BEST_COMPRESSION, zlib.DEFLATED, -zlib.MAX_WBITS
+    )
+    packed = compressor.compress(text.encode("utf-8")) + compressor.flush()
+    packed += bytes(-len(packed) % BLOCK_SIZE)
+    encoded = base64.b64encode(packed).decode("ascii")
+    return encoded.translate(TRANSLATION)
+
+
+def show_image(plantuml_text):
+    """Скачивает изображение диаграммы, сохраняет и открывает его."""
+    url = f"{PLANTUML_URL}{encode_plantuml(plantuml_text)}"
+    data = download_bytes(url)
+    try:
+        with open(IMAGE_FILE, "wb") as file:
+            file.write(data)
+    except OSError as error:
+        raise ConfigError(f"Не удалось сохранить изображение: {error}")
+    print(f"Изображение сохранено в файл {IMAGE_FILE}")
+    webbrowser.open(Path(IMAGE_FILE).resolve().as_uri())
+
+
+def show_results(config, graph):
+    """Выводит граф, ASCII-дерево, текст PlantUML и показывает рисунок."""
+    name = config["package_name"]
+    print_graph(name, graph, config["reverse_mode"])
+    if config["ascii_tree"]:
+        print()
+        print(make_ascii_tree(name, graph))
+    plantuml_text = make_plantuml(graph, config["reverse_mode"])
+    print()
+    print(plantuml_text)
+    show_image(plantuml_text)
+
+
 def main():
-    """Читает конфигурацию, строит и выводит граф зависимостей."""
+    """Читает конфигурацию, строит граф и выводит результаты."""
     parser = argparse.ArgumentParser(description="Граф зависимостей пакета")
     parser.add_argument(
         "-c", "--config", default="config.yaml", help="путь к YAML-файлу"
@@ -266,9 +392,9 @@ def main():
         source = load_source(config)
         root = [config["package_name"]]
         build_graph(root, graph, source, config, ROOT_DEPTH)
+        show_results(config, graph)
     except ConfigError as error:
         raise SystemExit(f"Ошибка: {error}")
-    print_graph(config["package_name"], graph, config["reverse_mode"])
 
 
 if __name__ == "__main__":
