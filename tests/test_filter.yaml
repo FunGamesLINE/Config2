@@ -1,6 +1,7 @@
 package_name: A
 repository_url: tests/test_graph.txt
 test_mode: true
+reverse_mode: false
 ascii_tree: true
 max_depth: 10
 filter_substring: "D"

@@ -11,6 +11,7 @@ TIMEOUT = 10
 GITHUB_PREFIX = "https://github.com/"
 RAW_PREFIX = "https://raw.githubusercontent.com/"
 API_URL = "https://crates.io/api/v1/crates/"
+REVERSE_SUFFIX = "/reverse_dependencies?per_page=100"
 MANIFEST_NAME = "Cargo.toml"
 NORMAL_KIND = "normal"
 HEADERS = {"User-Agent": "dep-graph-student-project"}
@@ -19,6 +20,7 @@ PARAMS = {
     "package_name": str,
     "repository_url": str,
     "test_mode": bool,
+    "reverse_mode": bool,
     "ascii_tree": bool,
     "max_depth": int,
     "filter_substring": str,
@@ -131,6 +133,16 @@ def parse_graph(text):
     return graph
 
 
+def invert_graph(graph):
+    """Разворачивает граф: пакет - список пакетов, зависящих от него."""
+    reverse = {}
+    for name, children in graph.items():
+        reverse.setdefault(name, [])
+        for child in children:
+            reverse.setdefault(child, []).append(name)
+    return reverse
+
+
 def fetch_json(url):
     """Скачивает ответ по ссылке и разбирает его как JSON."""
     text = download_text(url)
@@ -163,22 +175,44 @@ def fetch_crate_dependencies(name):
         raise ConfigError(f"Неверный ответ реестра для '{name}'")
 
 
+def fetch_reverse_dependencies(name):
+    """Получает имена пакетов, которые зависят от пакета, с crates.io."""
+    data = fetch_json(f"{API_URL}{name}{REVERSE_SUFFIX}")
+    try:
+        owners = {item["id"]: item["crate"] for item in data["versions"]}
+        result = []
+        for item in data["dependencies"]:
+            owner = owners[item["version_id"]]
+            if item["kind"] == NORMAL_KIND and owner not in result:
+                result.append(owner)
+        return result
+    except (KeyError, TypeError):
+        raise ConfigError(f"Неверный ответ реестра для '{name}'")
+
+
 def load_source(config):
-    """Возвращает словарь пакет - список зависимостей с корневым пакетом."""
-    text = read_manifest_text(config)
+    """Возвращает словарь пакет - список его зависимостей (или зависимых)."""
     name = config["package_name"]
+    if config["reverse_mode"] and not config["test_mode"]:
+        return {}
+    text = read_manifest_text(config)
     if config["test_mode"]:
         source = parse_graph(text)
+        if config["reverse_mode"]:
+            source = invert_graph(source)
         if name not in source:
             raise ConfigError(f"Пакет '{name}' не найден в файле графа")
         return source
     return {name: list(get_dependencies(text))}
 
 
-def get_children(source, name, test_mode):
+def get_children(source, name, config):
     """Возвращает зависимости пакета, при необходимости загружая их."""
-    if name not in source and not test_mode:
-        source[name] = fetch_crate_dependencies(name)
+    if name not in source and not config["test_mode"]:
+        if config["reverse_mode"]:
+            source[name] = fetch_reverse_dependencies(name)
+        else:
+            source[name] = fetch_crate_dependencies(name)
     return source.get(name, [])
 
 
@@ -195,7 +229,7 @@ def build_graph(level, graph, source, config, depth):
     for name in level:
         if name in graph:
             continue
-        children = get_children(source, name, config["test_mode"])
+        children = get_children(source, name, config)
         children = [
             child
             for child in children
@@ -206,9 +240,13 @@ def build_graph(level, graph, source, config, depth):
     build_graph(next_level, graph, source, config, depth + 1)
 
 
-def print_graph(package_name, graph):
-    """Выводит граф: пакет и его прямые зависимости."""
-    print(f"Граф зависимостей пакета {package_name}:")
+def print_graph(package_name, graph, reverse_mode):
+    """Выводит граф: пакет и его прямые или обратные зависимости."""
+    if reverse_mode:
+        title = "Обратные зависимости пакета"
+    else:
+        title = "Граф зависимостей пакета"
+    print(f"{title} {package_name}:")
     for name, children in graph.items():
         text = " ".join(children) or "нет"
         print(f"{name}: {text}")
@@ -230,7 +268,7 @@ def main():
         build_graph(root, graph, source, config, ROOT_DEPTH)
     except ConfigError as error:
         raise SystemExit(f"Ошибка: {error}")
-    print_graph(config["package_name"], graph)
+    print_graph(config["package_name"], graph, config["reverse_mode"])
 
 
 if __name__ == "__main__":

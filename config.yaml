@@ -1,6 +1,7 @@
 package_name: ripgrep
 repository_url: https://github.com/BurntSushi/ripgrep
 test_mode: false
+reverse_mode: false
 ascii_tree: true
 max_depth: 2
 filter_substring: test

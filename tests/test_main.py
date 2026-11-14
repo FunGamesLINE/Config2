@@ -6,6 +6,7 @@ from src.main import (
     ConfigError,
     build_graph,
     get_dependencies,
+    invert_graph,
     make_manifest_url,
     parse_graph,
     validate_config,
@@ -15,6 +16,7 @@ VALID = {
     "package_name": "requests",
     "repository_url": "https://example.com/repo",
     "test_mode": False,
+    "reverse_mode": False,
     "ascii_tree": True,
     "max_depth": 3,
     "filter_substring": "",
@@ -155,6 +157,29 @@ class BuildGraphTest(unittest.TestCase):
         """Цикл не приводит к зависанию."""
         graph = make_graph("X", CYCLE, 10)
         self.assertEqual(graph, CYCLE)
+
+
+class ReverseGraphTest(unittest.TestCase):
+    """Проверки обратных зависимостей."""
+
+    def test_invert(self):
+        """Граф разворачивается: от D зависят B и C."""
+        result = invert_graph(SOURCE)
+        self.assertEqual(result["D"], ["B", "C"])
+        self.assertEqual(result["A"], [])
+
+    def test_reverse_full(self):
+        """Обход находит всё, что зависит от пакета."""
+        graph = make_graph("F", invert_graph(SOURCE), 10)
+        self.assertEqual(
+            graph,
+            {"F": ["D"], "D": ["B", "C"], "B": ["A"], "C": ["A"], "A": []},
+        )
+
+    def test_reverse_cycle(self):
+        """Цикл в обратном режиме не приводит к зависанию."""
+        graph = make_graph("X", invert_graph(CYCLE), 10)
+        self.assertEqual(graph, {"X": ["Z"], "Z": ["Y"], "Y": ["X"]})
 
 
 if __name__ == "__main__":
